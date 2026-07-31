@@ -1,0 +1,16 @@
+{
+  "name": "my-netlify-site",
+  "version": "1.0.0",
+  "description": "A simple static site deployed to Netlify via GitHub Actions",
+  "main": "index.html",
+  "scripts": {
+    "build": "mkdir -p dist && cp index.html dist/"
+  },
+  "keywords": [
+    "netlify",
+    "github-actions",
+    "static-site"
+  ],
+  "author": "",
+  "license": "ISC"
+}'
