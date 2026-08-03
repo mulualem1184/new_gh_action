@@ -1,1 +1,182 @@
 
+name: Deploy to Netlify
+
+on:
+  # Trigger on pull requests to main
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+  # Trigger on push to main (for deployment)
+  push:
+    branches:
+      - main
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  # ============================================
+  # JOB 1: Pull Request Check & Message
+  # ============================================
+  pr-check:
+    name: PR Check & Notification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for changes
+        id: changes
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            source:
+              - '**/*'
+              - '!README.md'
+              - '!*.md'
+
+      - name: Add PR Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const hasChanges = '${{ steps.changes.outputs.source }}' === 'true';
+            
+            let message = '## 📋 Pull Request Received\n\n';
+            message += '### ✅ Status: Review in Progress\n\n';
+            
+            if (hasChanges) {
+              message += '📦 **Changes detected** in the following areas:\n';
+              message += '- Source code files\n';
+              message += '- Configuration files\n\n';
+              message += '🔄 **Next Steps:**\n';
+              message += '1. Code review in progress\n';
+              message += '2. If approved, changes will be deployed to Netlify\n';
+              message += '3. Deployment will happen automatically on merge\n\n';
+            } else {
+              message += 'ℹ️ No significant changes detected (only documentation updates).\n\n';
+            }
+            
+            message += '---\n';
+            message += `🕐 **Timestamp:** ${new Date().toUTCString()}\n`;
+            message += `👤 **Author:** @${{ github.actor }}\n`;
+            message += `🔗 **PR Link:** ${context.payload.pull_request.html_url}`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
+
+      - name: Send PR Notification
+        if: steps.changes.outputs.source == 'true'
+        run: |
+          echo "🔔 PR opened with code changes - deployment will happen on merge"
+
+  # ============================================
+  # JOB 2: Deploy to Netlify (on push to main)
+  # ============================================
+  deploy:
+    name: Deploy to Netlify
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project
+        run: npm run build
+
+      - name: Deploy to Netlify
+        id: netlify
+        uses: nwtgck/actions-netlify@v3.0
+        with:
+          publish-dir: './dist'
+          production-branch: main
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-message: "Deploy from GitHub Actions - ${{ github.sha }}"
+          enable-pull-request-comment: true
+          enable-commit-comment: true
+          overwrites-pull-request-comment: true
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+      - name: Send Deployment Success Message
+        if: success()
+        run: |
+          echo "✅ Deployment successful!"
+          echo "🌐 URL: ${{ steps.netlify.outputs.deploy-url }}"
+          echo "🔗 Live URL: ${{ steps.netlify.outputs.live-url }}"
+
+      - name: Send Deployment Failure Message
+        if: failure()
+        run: |
+          echo "❌ Deployment failed!"
+          echo "Please check the logs above for details."
+
+  # ============================================
+  # JOB 3: Post-Deployment Notification
+  # ============================================
+  notify:
+    name: Send Deployment Notification
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always() && github.event_name == 'push'
+    
+    steps:
+      - name: Create Deployment Status Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ needs.deploy.result }}';
+            const sha = '${{ github.sha }}';
+            const commitUrl = `https://github.com/${{ github.repository }}/commit/${sha}`;
+            
+            let emoji = status === 'success' ? '✅' : '❌';
+            let message = `## ${emoji} Deployment ${status === 'success' ? 'Successful' : 'Failed'}\n\n`;
+            message += `📦 **Commit:** [${sha.slice(0, 7)}](${commitUrl})\n`;
+            message += `👤 **Author:** @${{ github.actor }}\n`;
+            message += `🕐 **Time:** ${new Date().toUTCString()}\n\n`;
+            
+            if (status === 'success') {
+              message += '🌐 **Live URL:** https://${{ secrets.NETLIFY_SITE_NAME }}.netlify.app\n';
+              message += '---\n';
+              message += '🎉 Changes are now live!';
+            } else {
+              message += '⚠️ Please check the workflow logs for details.';
+            }
+            
+            // Find the commit and add a status check comment
+            const { data: commits } = await github.rest.repos.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: sha,
+              per_page: 1
+            });
+            
+            if (commits.length > 0) {
+              const commit = commits[0];
+              await github.rest.repos.createCommitComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: sha,
+                body: message
+              });
+            }
