@@ -1,5 +1,12 @@
-
 name: Deploy to Netlify
+
+# Add permissions at the workflow level to fix the "Resource not accessible" error
+permissions:
+  contents: write        # For creating commit comments
+  pull-requests: write   # For PR comments
+  issues: write          # For issue comments
+  statuses: write        # For commit statuses
+  checks: write          # For check runs
 
 on:
   # Trigger on pull requests to main
@@ -163,20 +170,98 @@ jobs:
               message += '⚠️ Please check the workflow logs for details.';
             }
             
-            // Find the commit and add a status check comment
-            const { data: commits } = await github.rest.repos.listCommits({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: sha,
-              per_page: 1
-            });
-            
-            if (commits.length > 0) {
-              const commit = commits[0];
-              await github.rest.repos.createCommitComment({
+            try {
+              // Try to create a commit comment
+              const { data: commit } = await github.rest.repos.getCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                commit_sha: sha,
-                body: message
+                ref: sha
               });
+              
+              if (commit) {
+                await github.rest.repos.createCommitComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commit_sha: sha,
+                  body: message
+                });
+                console.log('✅ Commit comment created successfully');
+              }
+            } catch (error) {
+              console.log('⚠️ Could not create commit comment:', error.message);
+              
+              // Fallback: Post as step summary
+              await core.summary
+                .addHeading(`${emoji} Deployment ${status === 'success' ? 'Successful' : 'Failed'}`)
+                .addTable([
+                  ['Commit', `[${sha.slice(0, 7)}](${commitUrl})`],
+                  ['Author', `@${{ github.actor }}`],
+                  ['Time', new Date().toUTCString()]
+                ])
+                .addBreak()
+                .addRaw(message)
+                .write();
+              
+              // Try to find and comment on associated PR
+              try {
+                const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commit_sha: sha
+                });
+                
+                if (prs && prs.length > 0) {
+                  await github.rest.issues.createComment({
+                    issue_number: prs[0].number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: message
+                  });
+                  console.log('✅ PR comment created successfully');
+                }
+              } catch (prError) {
+                console.log('⚠️ Could not create PR comment:', prError.message);
+              }
             }
+
+      - name: Send Notification to Slack (Optional)
+        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "Deployment ${{ needs.deploy.result }} for ${{ github.repository }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment ${{ needs.deploy.result == 'success' ? '✅ Successful' : '❌ Failed' }}*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n${{ github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author:*\n@${{ github.actor }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Time:*\n${{ github.event.head_commit.timestamp }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
